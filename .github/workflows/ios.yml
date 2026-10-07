@@ -3,19 +3,91 @@ name: iOS
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   build-and-test:
     runs-on: macos-15
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
       - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.app || true
+        run: |
+          ls /Applications | grep -i xcode || true
+          sudo xcode-select -s /Applications/Xcode_16.4.app 2>/dev/null \
+            || sudo xcode-select -s /Applications/Xcode_16.2.app 2>/dev/null \
+            || sudo xcode-select -s /Applications/Xcode_16.app 2>/dev/null || true
+          xcodebuild -version
+
       - name: LumenKit tests
         run: swift test --package-path Packages/LumenKit
-      - name: Build and test app
+
+      - name: Project sanity
         run: |
-          DEST=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for k,v in d.items() if 'iOS' in k for x in v if x['name'].startswith('iPhone')))")
-          xcodebuild test -project Lumen.xcodeproj -scheme Lumen \
-            -destination "id=$DEST" \
-            -quiet CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO
+          xcodebuild -list -project Lumen.xcodeproj
+          xcrun simctl list devices available | grep -i iphone | head -5
+
+      - name: Build app (simulator)
+        id: build
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project Lumen.xcodeproj -scheme Lumen \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO 2>&1 | tee build.log
+        continue-on-error: true
+
+      - name: Report build errors as annotations
+        if: always()
+        run: |
+          # The job log needs admin rights to download, but annotations are public.
+          grep -E "(error|warning): " build.log | grep -v "^warning: in the working copy" | sort -u > problems.txt || true
+          echo "Problems found: $(wc -l < problems.txt)"
+          # Up to 10 errors and 10 warnings are shown as annotations per step (GitHub limit).
+          grep -E "error: " problems.txt | head -10 | while IFS= read -r line; do
+            file=$(echo "$line" | sed -nE 's#^(/[^:]+):([0-9]+):([0-9]+): .*#\1#p' | sed "s#$GITHUB_WORKSPACE/##")
+            ln=$(echo "$line" | sed -nE 's#^/[^:]+:([0-9]+):([0-9]+): .*#\1#p')
+            msg=$(echo "$line" | sed -E 's#^/[^:]+:[0-9]+:[0-9]+: ##' | cut -c1-900)
+            if [ -n "$file" ]; then echo "::error file=$file,line=${ln:-1}::$msg"; else echo "::error::$(echo "$line" | cut -c1-900)"; fi
+          done
+          grep -E "warning: " problems.txt | grep -v "error: " | head -10 | while IFS= read -r line; do
+            file=$(echo "$line" | sed -nE 's#^(/[^:]+):([0-9]+):([0-9]+): .*#\1#p' | sed "s#$GITHUB_WORKSPACE/##")
+            ln=$(echo "$line" | sed -nE 's#^/[^:]+:([0-9]+):([0-9]+): .*#\1#p')
+            msg=$(echo "$line" | sed -E 's#^/[^:]+:[0-9]+:[0-9]+: ##' | cut -c1-900)
+            if [ -n "$file" ]; then echo "::warning file=$file,line=${ln:-1}::$msg"; fi
+          done
+          # Last lines of the log for non-compiler failures (destination, signing, project load).
+          if [ "${{ steps.build.outcome }}" != "success" ]; then
+            echo "::error::BUILD FAILED. Log tail: $(tail -c 1500 build.log | tr '\n' ' ' | cut -c1-1500)"
+          fi
+          { echo '## Build problems'; echo '```'; cat problems.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if build failed
+        if: steps.build.outcome != 'success'
+        run: exit 1
+
+      - name: Run app tests (simulator)
+        run: |
+          set -o pipefail
+          xcodebuild test-without-building \
+            -project Lumen.xcodeproj -scheme Lumen \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -derivedDataPath build \
+            -only-testing:LumenTests 2>&1 | tee test.log
+        continue-on-error: true
+        id: tests
+
+      - name: Report test failures as annotations
+        if: always()
+        run: |
+          if [ -f test.log ]; then
+            grep -E "(error: |Test Case .* failed|failed \()" test.log | sort -u | head -10 | while IFS= read -r line; do
+              echo "::error::TEST: $(echo "$line" | cut -c1-900)"
+            done
+            if [ "${{ steps.tests.outcome }}" != "success" ]; then
+              echo "::error::TESTS FAILED. Log tail: $(tail -c 1500 test.log | tr '\n' ' ' | cut -c1-1500)"
+              exit 1
+            fi
+          fi

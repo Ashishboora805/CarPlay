@@ -30,6 +30,9 @@ final class CarPlayCoordinator: NSObject {
     private var observers: [NSObjectProtocol] = []
     private var reloadTask: Task<Void, Never>?
     private var imageTasks: [Task<Void, Never>] = []
+    /// The category list currently pushed over Browse, so its rows can be refreshed too.
+    private weak var pushedCategoryTemplate: CPListTemplate?
+    private var pushedCategoryName: String?
 
     init(interfaceController: CPInterfaceController, channels: ChannelRepository, library: LibraryStore,
          player: PlayerManager, epg: EPGManager, settings: AppSettings, images: ImagePipeline) {
@@ -129,6 +132,11 @@ final class CarPlayCoordinator: NSObject {
         recentsTemplate.updateSections([CPListSection(items: items(for: recents, context: recents))])
 
         browseTemplate.updateSections([CPListSection(items: categoryItems(snapshot: snapshot))])
+
+        if let template = pushedCategoryTemplate, let name = pushedCategoryName {
+            let list = snapshot.channels(in: name).filter { !$0.isYouTube }
+            template.updateSections([CPListSection(items: items(for: list, context: list))])
+        }
     }
 
     private func items(for list: [Channel], context: [Channel]) -> [CPListItem] {
@@ -176,6 +184,8 @@ final class CarPlayCoordinator: NSObject {
         let channels = channels.snapshot.channels(in: name).filter { !$0.isYouTube }
         let template = CPListTemplate(title: name, sections: [CPListSection(items: items(for: channels, context: channels))])
         template.emptyViewTitleVariants = ["No Channels"]
+        pushedCategoryTemplate = template
+        pushedCategoryName = name
         interfaceController.pushTemplate(template, animated: true, completion: nil)
     }
 

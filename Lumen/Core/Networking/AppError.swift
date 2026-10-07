@@ -57,7 +57,7 @@ enum AppError: Error, Equatable, Hashable, Sendable {
         case .emptyPlaylist: "The playlist contains no playable channels."
         case .epgUnavailable: "Guide data couldn't be loaded. Showing the last saved guide where available."
         case .streamUnavailable: "The stream may be offline or unavailable."
-        case .unsupportedFormat: "This stream uses a format or codec that iOS can't play."
+        case .unsupportedFormat: "This stream uses a format or codec iOS can't play (for example raw MPEG-TS). Ask your provider for an HLS (.m3u8) link."
         case .embeddingNotAllowed: "The owner of this video doesn't allow playback in other apps. Open it in YouTube instead."
         case .cancelled: "The operation was cancelled."
         case .unknown(let detail): detail.isEmpty ? "Please try again." : detail

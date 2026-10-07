@@ -19,6 +19,7 @@ final class EPGManager {
     @ObservationIgnored private let loader: EPGLoader
     @ObservationIgnored private let settings: AppSettings
     @ObservationIgnored private var loadTask: Task<Void, Never>?
+    @ObservationIgnored private var loadingTargets: [EPGTarget] = []
     @ObservationIgnored private var mappingTask: Task<Void, Never>?
 
     init(loader: EPGLoader, settings: AppSettings) {
@@ -41,13 +42,23 @@ final class EPGManager {
         }
 
         guard !targets.isEmpty else {
+            loadTask?.cancel() // a still-running load must not resurrect a removed guide
+            isLoading = false
             index = EPGIndex()
             lastError = nil
             remap()
             return
         }
 
+        // Don't throw away an in-flight download (which can take a minute for big XMLTV files)
+        // just because the app foregrounded or the user pulled to refresh: join it instead.
+        if !force, let running = loadTask, isLoading, loadingTargets == targets {
+            await running.value
+            return
+        }
+
         loadTask?.cancel()
+        loadingTargets = targets
         isLoading = true
         let maxAge = TimeInterval(settings.epgRefreshHours) * 3600
         let loader = loader

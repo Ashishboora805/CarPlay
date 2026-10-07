@@ -17,6 +17,7 @@ enum YouTubePlayerEvent: Equatable {
         switch code {
         case 101, 150, 152, 153: return .embeddingNotAllowed
         case 100: return .unknown("This video is unavailable or private.")
+        case -1: return .offline
         case 2: return .invalidURL
         default: return .unknown("YouTube couldn't play this video (error \(code)).")
         }
@@ -66,11 +67,13 @@ struct YouTubePlayerView: UIViewRepresentable {
         webView.loadHTMLString("", baseURL: nil)
     }
 
-    /// The embed's origin. YouTube requires embeds to identify the embedding client via the
-    /// referrer/origin; for apps the convention is the bundle identifier as an https origin.
+    /// The embed's origin. YouTube requires embeds to identify the embedding client through the
+    /// page origin/referrer. This mirrors Google's youtube-ios-player-helper, which uses
+    /// `http://<bundle identifier>` as both the WKWebView base URL and the `origin` player var.
+    /// (Missing or mismatched origins are the usual cause of embed error 153.)
     static var embedOrigin: URL {
         let bundleID = (Bundle.main.bundleIdentifier ?? "app.lumen").lowercased()
-        return URL(string: "https://\(bundleID)") ?? URL(string: "https://app.lumen")!
+        return URL(string: "http://\(bundleID)") ?? URL(string: "http://app.lumen")!
     }
 
     static func html(videoID: String, origin: String) -> String {
@@ -80,6 +83,7 @@ struct YouTubePlayerView: UIViewRepresentable {
         <!DOCTYPE html>
         <html><head>
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+        <meta name="referrer" content="strict-origin-when-cross-origin">
         <style>html,body{margin:0;padding:0;background:#000;height:100%;overflow:hidden}#player{position:absolute;inset:0;width:100%;height:100%}</style>
         </head><body>
         <div id="player"></div>
@@ -87,12 +91,12 @@ struct YouTubePlayerView: UIViewRepresentable {
         function post(name, data) { window.webkit.messageHandlers.\(Coordinator.messageName).postMessage({event: name, data: data}); }
         var tag = document.createElement('script');
         tag.src = 'https://www.youtube.com/iframe_api';
+        tag.onerror = function() { post('error', -1); }; // offline / blocked: don't spin forever
         document.head.appendChild(tag);
         var player;
         function onYouTubeIframeAPIReady() {
           player = new YT.Player('player', {
             videoId: '\(videoID)',
-            host: 'https://www.youtube-nocookie.com',
             playerVars: { playsinline: 1, autoplay: 1, rel: 0, origin: '\(origin)', widget_referrer: '\(origin)' },
             events: {
               onReady: function(e) { post('ready', 0); e.target.playVideo(); },
@@ -150,7 +154,15 @@ struct YouTubePlayerView: UIViewRepresentable {
             guard let url = navigationAction.request.url else { return .cancel }
             let isMainFrame = navigationAction.targetFrame?.isMainFrame ?? true
             if !isMainFrame { return .allow } // the YouTube iframe and its resources
-            if url == YouTubePlayerView.embedOrigin || url.absoluteString == "about:blank" || url.scheme == "about" {
+            if url.host?.lowercased() == YouTubePlayerView.embedOrigin.host || url.scheme == "about" {
+                return .allow // our own page (the base URL) and about:blank
+            }
+            // Same allow-list as Google's youtube-ios-player-helper: the embed, ads, consent and
+            // sign-in frames may navigate; anything else (logo, title, "Watch on YouTube") opens externally.
+            if let host = url.host?.lowercased(),
+               (host.hasSuffix("youtube.com") && url.path.hasPrefix("/embed/"))
+                || host == "accounts.google.com" || host == "content.googleapis.com"
+                || host.hasSuffix("googlesyndication.com") || host.hasSuffix("doubleclick.net") {
                 return .allow
             }
             if navigationAction.navigationType == .linkActivated {

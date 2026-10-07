@@ -14,6 +14,13 @@ struct RootView: View {
 
         TabView(selection: $router.selectedTab) {
             HomeView()
+                // Presented from here rather than the TabView so it never shares a presenter
+                // with the IPTV player's cover below.
+                .fullScreenCover(item: $router.youtubeRequest) { request in
+                    YouTubePlayerScreen(request: request)
+                        .tint(settings.accent.color)
+                        .preferredColorScheme(.dark)
+                }
                 .tabItem { Label("Home", systemImage: "house.fill") }
                 .tag(AppTab.home)
             LiveTVView()
@@ -35,15 +42,6 @@ struct RootView: View {
             PlayerScreen()
                 .tint(settings.accent.color)
                 .preferredColorScheme(.dark)
-        }
-        .background {
-            // Second presenter so the YouTube player doesn't compete with the IPTV player cover.
-            Color.clear
-                .fullScreenCover(item: $router.youtubeRequest) { request in
-                    YouTubePlayerScreen(request: request)
-                        .tint(settings.accent.color)
-                        .preferredColorScheme(.dark)
-                }
         }
         .sheet(isPresented: $router.isAddingSource) {
             NavigationStack { SourceEditorView(sourceID: nil) }

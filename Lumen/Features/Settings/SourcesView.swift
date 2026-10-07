@@ -103,14 +103,22 @@ private struct SourceRow: View {
 }
 
 struct SourceEditorView: View {
+    enum Mode: String, CaseIterable, Identifiable {
+        case m3u, xtream
+        var id: String { rawValue }
+        var title: String { self == .m3u ? "M3U Link" : "Xtream Codes" }
+    }
+
     let sourceID: UUID?
 
     @Environment(LibraryStore.self) private var library
     @Environment(ChannelRepository.self) private var channels
     @Environment(\.dismiss) private var dismiss
 
+    @State private var mode: Mode = .m3u
     @State private var name = ""
     @State private var playlistURL = ""
+    @State private var xtreamServer = ""
     @State private var epgURL = ""
     @State private var username = ""
     @State private var password = ""
@@ -124,22 +132,47 @@ struct SourceEditorView: View {
 
     var body: some View {
         Form {
+            if isNew {
+                Picker("Type", selection: $mode) {
+                    ForEach(Mode.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets())
+            }
+
             Section {
                 TextField("Name", text: $name)
-                TextField("Playlist URL (M3U / M3U8)", text: $playlistURL, axis: .vertical)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .lineLimit(1...3)
-                    .accessibilityIdentifier("playlistURL")
-                TextField("EPG URL (XMLTV, optional)", text: $epgURL, axis: .vertical)
-                    .keyboardType(.URL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .lineLimit(1...3)
+                if mode == .m3u {
+                    TextField("Playlist URL (M3U / M3U8)", text: $playlistURL, axis: .vertical)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .lineLimit(1...3)
+                        .accessibilityIdentifier("playlistURL")
+                    TextField("EPG URL (XMLTV, optional)", text: $epgURL, axis: .vertical)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .lineLimit(1...3)
+                } else {
+                    TextField("Server (e.g. http://host:port)", text: $xtreamServer)
+                        .keyboardType(.URL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .accessibilityIdentifier("xtreamServer")
+                    TextField("Username", text: $username)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textContentType(.username)
+                    SecureField("Password", text: $password)
+                        .textContentType(.password)
+                }
             } footer: {
                 if let validationMessage {
                     Text(validationMessage).foregroundStyle(.red)
+                } else if mode == .xtream {
+                    Text("Uses your provider's standard playlist and guide exports. Credentials are stored in the Keychain and sent only to this server.")
                 } else if playlistURL.lowercased().hasPrefix("http://") {
                     Label("This playlist uses an unencrypted connection (http). Prefer https if your provider supports it.",
                           systemImage: "lock.open")
@@ -148,17 +181,19 @@ struct SourceEditorView: View {
                 }
             }
 
-            Section {
-                TextField("Username", text: $username)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .textContentType(.username)
-                SecureField("Password", text: $password)
-                    .textContentType(.password)
-            } header: {
-                Text("Authentication (optional)")
-            } footer: {
-                Text("For servers that use HTTP Basic authentication. Stored in the Keychain.")
+            if mode == .m3u {
+                Section {
+                    TextField("Username", text: $username)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textContentType(.username)
+                    SecureField("Password", text: $password)
+                        .textContentType(.password)
+                } header: {
+                    Text("Authentication (optional)")
+                } footer: {
+                    Text("For servers that use HTTP Basic authentication. Stored in the Keychain.")
+                }
             }
 
             Section("Options") {
@@ -188,7 +223,9 @@ struct SourceEditorView: View {
             }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save", action: save)
-                    .disabled(playlistURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(mode == .m3u
+                              ? playlistURL.trimmingCharacters(in: .whitespaces).isEmpty
+                              : xtreamServer.trimmingCharacters(in: .whitespaces).isEmpty)
             }
         }
         .confirmationDialog("Delete this playlist? Its channels will be removed from Lumen.",
@@ -212,6 +249,18 @@ struct SourceEditorView: View {
         refreshHours = source.refreshIntervalHours
         isEnabled = source.isEnabled
         if let secrets = library.secrets(for: sourceID) {
+            // A saved Xtream login is edited as server/username/password, not as a raw get.php link.
+            if secrets.playlistURL.lastPathComponent == "get.php",
+               let items = URLComponents(url: secrets.playlistURL, resolvingAgainstBaseURL: false)?.queryItems,
+               let user = items.first(where: { $0.name == "username" })?.value,
+               let pass = items.first(where: { $0.name == "password" })?.value,
+               let account = XtreamCodes.account(server: secrets.playlistURL.absoluteString, username: user, password: pass) {
+                mode = .xtream
+                xtreamServer = account.server.absoluteString
+                username = user
+                password = pass
+                return
+            }
             playlistURL = secrets.playlistURL.absoluteString
             epgURL = secrets.epgURL?.absoluteString ?? ""
             username = secrets.credentials?.username ?? ""
@@ -220,22 +269,35 @@ struct SourceEditorView: View {
     }
 
     private func save() {
-        guard let playlist = URLValidator.userURL(from: playlistURL) else {
-            validationMessage = "Enter a valid playlist URL starting with http:// or https://."
-            return
-        }
-        var epg: URL?
-        if !epgURL.trimmingCharacters(in: .whitespaces).isEmpty {
-            guard let parsed = URLValidator.userURL(from: epgURL) else {
-                validationMessage = "Enter a valid EPG URL, or leave it empty."
+        let secrets: SourceSecrets
+        switch mode {
+        case .xtream:
+            // Credentials travel in the panel's own query parameters; no Basic auth header.
+            guard let account = XtreamCodes.account(server: xtreamServer, username: username, password: password),
+                  let playlist = account.playlistURL else {
+                validationMessage = "Enter the server address, username and password from your provider."
                 return
             }
-            epg = parsed
+            secrets = SourceSecrets(playlistURL: playlist, epgURL: account.epgURL, credentials: nil)
+            if name.trimmingCharacters(in: .whitespaces).isEmpty { name = account.server.host ?? "Xtream" }
+        case .m3u:
+            guard let playlist = URLValidator.userURL(from: playlistURL) else {
+                validationMessage = "Enter a valid playlist URL starting with http:// or https://."
+                return
+            }
+            var epg: URL?
+            if !epgURL.trimmingCharacters(in: .whitespaces).isEmpty {
+                guard let parsed = URLValidator.userURL(from: epgURL) else {
+                    validationMessage = "Enter a valid EPG URL, or leave it empty."
+                    return
+                }
+                epg = parsed
+            }
+            let trimmedUser = username.trimmingCharacters(in: .whitespaces)
+            let credentials = trimmedUser.isEmpty ? nil : SourceCredentials(username: trimmedUser, password: password)
+            secrets = SourceSecrets(playlistURL: playlist, epgURL: epg, credentials: credentials)
         }
-        let trimmedUser = username.trimmingCharacters(in: .whitespaces)
-        let credentials = trimmedUser.isEmpty ? nil : SourceCredentials(username: trimmedUser, password: password)
-        let id = library.saveSource(id: sourceID, name: name,
-                                    secrets: SourceSecrets(playlistURL: playlist, epgURL: epg, credentials: credentials),
+        let id = library.saveSource(id: sourceID, name: name, secrets: secrets,
                                     refreshIntervalHours: refreshHours, isEnabled: isEnabled)
         Task {
             if isEnabled {

@@ -6,6 +6,61 @@ Lumen is a lightweight, native iOS player for IPTV playlists you are authorized 
 
 ---
 
+
+
+
+
+
+Here are the commands to run the app. All of them are for your Mac (Terminal), with the project folder copied or pulled there first.
+
+1. Run the fast tests (no simulator needed)
+cd /path/to/CarPlay
+swift test --package-path Packages/LumenKit
+
+2. Open in Xcode and run on the simulator (easiest)
+open Lumen.xcodeproj
+Then in Xcode: choose the Lumen scheme, pick an iPhone simulator at the top, and press Cmd+R to run, Cmd+U for the tests.
+
+3. Build and run from the command line (no Xcode UI)
+# See which simulators you have
+xcrun simctl list devices available | grep iPhone
+
+# Build for the simulator (change the name to one from the list above)
+xcodebuild build -project Lumen.xcodeproj -scheme Lumen \
+  -destination 'platform=iOS Simulator,name=iPhone 16' \
+  -derivedDataPath build
+
+# Boot the simulator, install and launch the app
+xcrun simctl boot "iPhone 16"
+open -a Simulator
+xcrun simctl install booted build/Build/Products/Debug-iphonesimulator/Lumen.app
+xcrun simctl launch booted com.example.lumen
+
+4. Run all app tests from the command line
+xcodebuild test -project Lumen.xcodeproj -scheme Lumen \
+  -destination 'platform=iOS Simulator,name=iPhone 16'
+
+5. CarPlay
+With the app running in the simulator: menu I/O → External Displays → CarPlay. A CarPlay window opens; tap the Lumen icon there.
+
+6. Run on a real iPhone
+1. Open Lumen.xcodeproj, select the Lumen target → Signing & Capabilities, set your Team, and change the bundle ID from com.example.lumen to your own.
+2. Remove the com.apple.developer.carplay-audio line from Lumen/Support/Lumen.entitlements until Apple grants you that entitlement, or the device build won't sign.
+3. Plug in the iPhone, select it at the top of Xcode, press Cmd+R.
+
+If any command fails, paste the full error text here and I'll fix it. The first build will probably produce a few compiler errors, since the code has never been compiled.
+
+
+
+
+
+
+
+
+
+
+
+
 ## Requirements
 
 | | |
@@ -84,10 +139,10 @@ LumenTests/   App unit tests.  LumenUITests/  UI smoke tests (synthetic data, no
 - *Navigation-style interaction*, as described in the original brief, isn't possible: the CarPlay navigation category is only for turn-by-turn navigation apps.
 
 ### YouTube
-- Videos play **inside the app** with YouTube's **official IFrame Player API** (`youtube-nocookie.com` host) in a WKWebView. This is YouTube's supported embedding method. Nothing is downloaded, scraped, proxied or extracted, and AVPlayer is never used for YouTube.
+- Videos play **inside the app** with YouTube's **official IFrame Player API** in a WKWebView, set up the same way as Google's own `youtube-ios-player-helper` (page origin = `http://<bundle id>`). This is YouTube's supported embedding method. Nothing is downloaded, scraped, proxied or extracted, and AVPlayer is never used for YouTube.
 - Search uses the official **YouTube Data API v3** with the **user's own API key**, stored in the Keychain. No key ships with the app. Without a key, users can paste links or tap **Browse YouTube**, which opens m.youtube.com in the in-app browser.
 - Videos whose owners disable embedding (IFrame errors 101/150/152/153) show a message and an **Open in YouTube** button.
-- The embed sends the bundle ID as its origin and referrer, as YouTube's embedding requirements ask. If you change the bundle ID, nothing else needs updating.
+- The embed page's origin and referrer are `http://<bundle id>`, exactly as Google's helper library does it; a missing or mismatched origin is the usual cause of embed error 153. If you change the bundle ID, nothing else needs updating.
 - Background audio and PiP for YouTube depend on YouTube's embed and aren't guaranteed.
 
 ### IPTV content
@@ -108,6 +163,7 @@ LumenTests/   App unit tests.  LumenUITests/  UI smoke tests (synthetic data, no
 
 | Area | Implementation |
 |---|---|
+| **Sources** | Two ways to add a provider: an **M3U/M3U8 link** (with optional XMLTV URL and HTTP Basic credentials) or an **Xtream Codes login** (server, username, password). Xtream logins use the panel's standard `get.php` playlist (`type=m3u_plus&output=m3u8`) and `xmltv.php` guide exports, so the rest of the pipeline is unchanged. |
 | **M3U parsing** | Streaming: `URLSession.bytes(...).lines` feeds `M3UParser` as data arrives, off the main thread. It handles `#EXTINF` attributes (`tvg-id/name/logo`, `group-title`, language, country), `#EXTGRP`, `#EXTVLCOPT:http-user-agent`, BOM/CRLF, header `url-tvg`, plain URL lists, malformed entries (skipped and counted) and duplicates. Channel IDs stay stable when providers rotate stream URL tokens. |
 | **EPG** | Downloaded **to disk**; `.gz` is decompressed file-to-file, then parsed as a stream, so peak memory stays low with 100 MB guides. Only programmes in [now − 2 h, now + 48 h] are kept. The parsed result is cached with ETag/Last-Modified and revalidated only when older than the refresh interval (6/12/24 h). On failure the last good guide is kept and an error is shown. Channel ↔ guide matching (tvg-id, case-insensitive, then display name) runs in the background. |
 | **Player** | One shared `AVPlayer`. Handles live and VOD (seek bar for VOD), audio/subtitle track menus (`AVMediaSelectionGroup`), PiP, AirPlay (`AVRoutePickerView`) and background audio (`audiovisualBackgroundPlaybackPolicy`). Errors are mapped to friendly messages. **Auto-reconnect** uses exponential back-off and waits for the network to return. A 15 s stall watchdog is active, with a smaller buffer on cellular, bitrate caps for Data Saver and Low Data Mode, and a live-edge rejoin after long pauses. Interruptions and media-services resets are handled, and Now Playing plus remote commands support channel up/down. |
@@ -117,6 +173,9 @@ LumenTests/   App unit tests.  LumenUITests/  UI smoke tests (synthetic data, no
 | **Offline** | The app opens from the channel cache (Application Support) and the guide cache with no network. Refreshes are skipped while offline, and a banner explains why. |
 | **Storage** | SwiftData holds sources, favorites and history. UserDefaults holds small preferences only. The Keychain (`AfterFirstUnlockThisDeviceOnly`, so CarPlay works while the phone is locked) holds playlist/EPG URLs, credentials and the YouTube key. Cache files use `completeUntilFirstUserAuthentication` protection and are excluded from backup. |
 | **Accessibility** | Dynamic Type text styles throughout, VoiceOver labels and actions (for example, "Add to Favorites" on rows), states shown with text or icons as well as color ("LIVE" badge, ★), Reduce Motion respected, high-contrast color variants, 44 pt hit targets, and player controls that stay visible while VoiceOver is on. |
+
+### Stream formats
+AVFoundation plays HLS (`.m3u8`), progressive MP4/MOV and other Apple-supported containers with H.264/HEVC/AAC/AC-3. It **cannot** play raw MPEG-TS (`.ts`) over plain HTTP, RTMP, RTSP or UDP multicast. Apps that do bundle FFmpeg/VLC (tens of MB), which the brief ruled out. Lumen mitigates the most common case: Xtream-style `/live/<user>/<pass>/<id>.ts` URLs are played through their `.m3u8` twin, and Xtream logins request HLS output up front. Other unsupported streams show "Format not supported" with advice to ask the provider for an HLS link.
 
 ### iCloud sync
 Not enabled. The SwiftData models avoid unique constraints and give every property a default, so they stay **CloudKit-compatible**. To turn sync on, add the iCloud (CloudKit) capability and set `cloudKitDatabase: .automatic` in `PersistenceFactory`. Only small records (sources, favorites, history) would sync; secrets stay in the device Keychain, so on other devices the playlist URLs must be re-entered.
@@ -159,5 +218,3 @@ The app has no third-party code or fonts. The only assets are a 6 KB placeholder
 - Replace the placeholder app icon, bundle ID and the placeholder Privacy and Terms text (Settings → About).
 - Get the CarPlay Audio entitlement.
 - Prepare an ATS justification and an App Review note: explain that the app ships no content, and give reviewers a demo playlist you're licensed to use.
-#   C a r P l a y  
- 

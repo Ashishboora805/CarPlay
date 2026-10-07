@@ -29,6 +29,7 @@ final class ChannelRepository {
     @ObservationIgnored private let network: NetworkMonitor
     @ObservationIgnored private let epg: EPGManager
     @ObservationIgnored private var rebuildGeneration = 0
+    @ObservationIgnored private var activeRefreshes = 0
 
     init(manager: PlaylistManager, library: LibraryStore, network: NetworkMonitor, epg: EPGManager) {
         self.manager = manager
@@ -48,6 +49,9 @@ final class ChannelRepository {
     }
 
     /// Refreshes stale (or all, when `force`) enabled sources, then the guide.
+    ///
+    /// Returns once the channel lists are updated. The guide refresh continues in the background
+    /// so pull-to-refresh doesn't spin for the length of an XMLTV download.
     func refreshAll(force: Bool) async {
         // Until the disk cache is loaded every source would look stale; bootstrap() calls this itself.
         guard hasLoadedCache, !isRefreshing else { return }
@@ -60,12 +64,12 @@ final class ChannelRepository {
                 for source in targets where playlists[source.id] == nil {
                     status[source.id] = .failed(.offline)
                 }
-                await refreshGuide(sources: sources, force: false)
+                Task { await refreshGuide(sources: sources, force: false) }
                 return
             }
             await refresh(targets)
         }
-        await refreshGuide(sources: sources, force: force)
+        Task { await refreshGuide(sources: sources, force: force) }
     }
 
     func refresh(sourceID: UUID) async {
@@ -103,8 +107,14 @@ final class ChannelRepository {
     }
 
     private func refresh(_ targets: [SourceDescriptor]) async {
+        // Several refreshes can overlap (add a source, then enable another); stay "refreshing"
+        // until the last one finishes.
+        activeRefreshes += 1
         isRefreshing = true
-        defer { isRefreshing = false }
+        defer {
+            activeRefreshes -= 1
+            isRefreshing = activeRefreshes > 0
+        }
         for source in targets { status[source.id] = .loading }
 
         let manager = manager

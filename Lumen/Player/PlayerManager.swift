@@ -131,8 +131,12 @@ final class PlayerManager: NSObject {
     func resume() {
         guard let channel = currentChannel else { return }
         activateAudioSession()
-        // After a long pause a live stream's buffer is stale; rejoin at the live edge.
-        if isLive, let pausedAt, Date().timeIntervalSince(pausedAt) > 30 {
+        // Pausing during a reconnect leaves a failed/half-loaded item behind; `play()` on it does
+        // nothing. Also, after a long pause a live stream's buffer is stale: rejoin at the live edge.
+        let itemBroken = player.currentItem == nil || player.currentItem?.status == .failed
+        let stale = isLive && pausedAt.map { Date().timeIntervalSince($0) > 30 } == true
+        if itemBroken || stale {
+            status = .loading
             startItem(for: channel)
         } else {
             player.play()
@@ -191,6 +195,7 @@ final class PlayerManager: NSObject {
         guard origin == .carPlay else { return }
         origin = .phone
         if let item = player.currentItem { applyQuality(to: item) }
+        updateNowPlaying()
     }
 
     func selectAudio(_ id: Int) {
@@ -261,7 +266,10 @@ final class PlayerManager: NSObject {
         if let userAgent = channel.userAgent {
             options[AVURLAssetHTTPUserAgentKey] = userAgent
         }
-        let asset = AVURLAsset(url: channel.streamURL, options: options)
+        // AVFoundation can't play raw MPEG-TS over HTTP. Xtream-style panels serve the same
+        // stream as HLS at the `.m3u8` path, so use that variant when the URL has that shape.
+        let streamURL = XtreamCodes.hlsAlternative(for: channel.streamURL) ?? channel.streamURL
+        let asset = AVURLAsset(url: streamURL, options: options)
         let item = AVPlayerItem(asset: asset)
         // On cellular keep a small forward buffer (saves data and battery); otherwise let AVFoundation decide.
         item.preferredForwardBufferDuration = network.isExpensive || network.isConstrained ? 6 : 0
@@ -350,9 +358,11 @@ final class PlayerManager: NSObject {
             if playingSince == nil { playingSince = .now }
             status = .playing
         case .waitingToPlayAtSpecifiedRate:
+            // Arm the watchdog first: a reconnect attempt whose server accepts the connection
+            // but never sends segments must still time out and try again.
+            startStallWatchdog()
             if case .reconnecting = status { return }
             status = status == .loading ? .loading : .buffering
-            startStallWatchdog()
         case .paused:
             if case .reconnecting = status { return }
             if case .failed = status { return }
@@ -380,6 +390,9 @@ final class PlayerManager: NSObject {
     private func handleFailure(_ error: Error?) {
         guard currentChannel != nil else { return }
         if case .failed = status { return }
+        // The old item's observers stay live during the back-off sleep; its late failure
+        // notifications must not count as extra attempts.
+        if case .reconnecting = status { return }
         let mapped = AppError.fromPlayback(error)
         let playedFor = playingSince.map { Date().timeIntervalSince($0) }
         playingSince = nil
@@ -647,8 +660,12 @@ extension PlayerManager: AVPictureInPictureControllerDelegate {
         _ controller: AVPictureInPictureController,
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
-        MainActor.assumeIsolated { isPlayerPresented = true }
-        completionHandler(true)
+        Task { @MainActor in
+            isPlayerPresented = true
+            // Let the full-screen cover present before the PiP window animates into the layer.
+            try? await Task.sleep(for: .milliseconds(350))
+            completionHandler(true)
+        }
     }
 
     nonisolated func pictureInPictureController(_ controller: AVPictureInPictureController,
